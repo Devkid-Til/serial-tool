@@ -288,13 +288,17 @@ detect_devices() {
             continue
         fi
 
-        read -p "  用途 (terminal/log-only) [默认 terminal]: " usage
-        usage=${usage:-terminal}
-        # 验证用途
-        if ! validate_usage "$usage"; then
-            echo "  跳过此设备"
-            continue
-        fi
+        # 用途选择菜单
+        echo "  用途:"
+        echo "    1) terminal  - 交互式终端（可输入命令）"
+        echo "    2) log-only  - 日志记录（主要用于输出）"
+        read -p "  请选择 [1-2, 默认 1]: " usage_choice
+
+        case "${usage_choice:-1}" in
+            1) usage="terminal" ;;
+            2) usage="log-only" ;;
+            *) usage="terminal" ;;
+        esac
 
         read -p "  备注: " desc
 
@@ -503,13 +507,6 @@ connect_device() {
     fi
 
     IFS='|' read -r _ path baud usage desc <<< "$info"
-
-    if [ "$usage" = "log-only" ]; then
-        echo "警告: $alias 是只读日志设备，不适合交互"
-        read -p "仍要继续吗? (y/N) " -n 1 -r
-        echo
-        [[ ! $REPLY =~ ^[Yy]$ ]] && return 1
-    fi
 
     local device="/dev/serial/by-path/$path"
     if [ ! -e "$device" ]; then
