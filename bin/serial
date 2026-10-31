@@ -859,67 +859,19 @@ monitor_devices() {
 
     # 显示操作提示
     cat <<EOF
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-监控会话已启动: $session
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-tmux 快捷键:
-  Ctrl+B → 方向键    切换窗格
-  Ctrl+B → z         当前窗格全屏/恢复
-  Ctrl+B → d         分离会话（后台运行）
-  Ctrl+B → [         滚动查看历史（q 退出）
-
-管理命令:
-  tmux attach -t $session      重新附加
-  tmux kill-session -t $session  关闭所有
-  tmux ls                       列出所有会话
-
+启动监控: $count 个设备
+设备列表: ${devices[*]}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 EOF
 
-    # 检测是否在 tmux 会话中（嵌套问题）
+    # 检测是否在 tmux 会话中
     if [ -n "$TMUX" ]; then
-        echo ""
-        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        echo "⚠️  检测到你在 tmux 会话中"
-        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        echo ""
-        echo "选项:"
-        echo "  1) 退出当前 tmux，进入新会话 (推荐)"
-        echo "  2) 在当前 tmux 中切换到这个会话"
-        echo "  3) 后台运行，稍后手动附加"
-        echo ""
-        read -p "请选择 [1-3]: " -n 1 -r
-        echo
-
-        case $REPLY in
-            1)
-                echo ""
-                echo "请先退出当前 tmux（Ctrl+B 然后按 D），然后运行:"
-                echo "  tmux attach -t $session"
-                return 0
-                ;;
-            2)
-                echo "切换到会话 $session ..."
-                tmux switch-client -t "$session"
-                return 0
-                ;;
-            3)
-                echo ""
-                echo "会话已在后台运行"
-                echo "稍后执行: tmux attach -t $session"
-                return 0
-                ;;
-            *)
-                echo ""
-                echo "无效选择，会话已在后台运行"
-                echo "稍后执行: tmux attach -t $session"
-                return 0
-                ;;
-        esac
+        # 在 tmux 里，直接切换会话
+        tmux switch-client -t "$session"
+        return 0
     fi
 
-    # 附加到会话
+    # 不在 tmux 里，附加到会话
     tmux attach -t "$session"
 }
 
