@@ -113,7 +113,7 @@ $ serial connect S100-UART
 | `serial detect [--auto]` | 扫描设备（可选自动配置） |
 | `serial show <别名>` | 显示设备详情 |
 | `serial connect <别名>` | 连接设备（交互模式） |
-| `serial log <别名>` | 记录设备日志（后台） |
+| `serial logs` | 管理日志文件（list/show/follow/clean） |
 | `serial monitor [板子]` | tmux 多窗口监控（无参数=所有设备） |
 | `serial rules` | 查看自动命名规则 |
 | `serial rule-add` | 添加规则 |

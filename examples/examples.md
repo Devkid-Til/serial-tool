@@ -54,16 +54,13 @@ serial list
 ## 示例 4：抓取启动日志
 
 ```bash
-# 后台记录启动日志
-serial log S100-BOOT &
+# 终端 1：连接 BOOT 串口（自动记录日志）
+serial connect S100-BOOT
 
-# 触发板子重启（通过继电器或手动）
-# ...
+# 终端 2：实时查看日志
+serial logs follow
 
-# 实时查看日志
-tail -f /tmp/serial-logs/S100-BOOT-*.log
-
-# 分析关键信息
+# 事后分析关键信息
 grep "U-Boot" /tmp/serial-logs/S100-BOOT-*.log
 grep "Kernel panic" /tmp/serial-logs/S100-BOOT-*.log
 ```
@@ -146,32 +143,29 @@ serial raw /dev/ttyUSB2 9600
 ## 示例 7：日志分析和处理
 
 ```bash
-# 抓取特定关键字
-serial log S100-BOOT /tmp/boot.log &
-LOG_PID=$!
+# 记录 60 秒日志（timeout 自动停止）
+timeout 60 serial connect S100-BOOT
 
-sleep 60  # 记录 60 秒
-
-kill $LOG_PID
+# 找到刚才的日志文件
+LOG=$(ls -t /tmp/serial-logs/S100-BOOT-*.log | head -1)
 
 # 分析日志
-grep -E "(U-Boot|Linux version|Kernel panic)" /tmp/boot.log
+grep -E "(U-Boot|Linux version|Kernel panic)" "$LOG"
 
 # 提取时间戳
-awk '{print $1, $2}' /tmp/boot.log | head -20
+awk '{print $1, $2}' "$LOG" | head -20
 
 # 统计错误
-grep -c "ERROR" /tmp/boot.log
+grep -c "ERROR" "$LOG"
 ```
 
 ## 示例 8：与其他工具配合
 
 ```bash
-# 使用 pyserial 发送命令，serial 记录日志
-serial log S100-UART /tmp/uart.log &
-LOG_PID=$!
+# 终端 1：连接串口（自动记录日志）
+serial connect S100-UART
 
-# 用 Python 发送命令
+# 终端 2：用 Python 发送命令
 python3 <<EOF
 import serial
 import time
@@ -183,9 +177,6 @@ time.sleep(2)
 ser.close()
 EOF
 
-# 停止记录
-kill $LOG_PID
-
-# 查看结果
-cat /tmp/uart.log
+# 终端 1 按 Ctrl-T Q 退出后，查看日志
+serial logs show S100-UART
 ```

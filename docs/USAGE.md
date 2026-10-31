@@ -68,11 +68,11 @@ serial detect --auto
 ### 2. 连接设备
 
 ```bash
-# 交互式终端
+# 交互式终端（自动记录日志）
 serial connect S100-UART
 
-# 后台记录日志
-serial log S100-BOOT
+# 查看已记录的日志
+serial logs show S100-BOOT
 ```
 
 ### 3. 查看设备
@@ -167,21 +167,18 @@ serial show S100-UART
 
 ---
 
-#### `serial add <别名> <by-path路径> [波特率] [用途] [备注]`
+#### 手动添加设备（编辑配置文件）
 
-手动添加设备配置。
+设备配置保存在 `~/.config/serial/devices.conf`，格式简单，可直接编辑：
 
-**参数**：
-- `别名`：设备的易记名称（必填）
-- `by-path路径`：USB 物理路径（必填，可通过 `serial detect` 查看）
-- `波特率`：默认 115200
-- `用途`：`terminal`（交互式）或 `log-only`（只读日志），默认 `terminal`
-- `备注`：设备描述信息
-
-**示例**：
 ```bash
-serial add S100-UART pci-0000:00:1d.0-usb-0:1:1.0-port0 921600 terminal "S100 主控 UART 终端"
+# 格式: 别名|by-path路径|波特率|用途|备注
+echo "S100-UART|pci-0000:00:1d.0-usb-0:1:1.0-port0|921600|terminal|S100 主控 UART 终端" >> ~/.config/serial/devices.conf
 ```
+
+by-path 路径可通过 `serial detect` 或 `ls /dev/serial/by-path/` 查看。
+
+**适用场景**：CI/CD 自动化、批量部署、版本控制配置。
 
 ---
 
@@ -240,7 +237,10 @@ pci-0000:00:1d.0-usb-0:2.1:*             S100-BOOT       921600     log-only    
 
 **参数**：
 - `by-path模式`：支持通配符 `*`（如 `pci-*-usb-0:1:*`）
-- 其他参数同 `serial add`
+- `别名`：设备的易记名称
+- `波特率`：默认 115200
+- `用途`：`terminal`（交互式）或 `log-only`（只读日志）
+- `备注`：设备描述信息
 
 **示例**：
 ```bash
@@ -285,25 +285,15 @@ serial connect S100-UART 115200    # 临时覆盖波特率
 
 ---
 
-#### `serial log <别名> [日志文件]`
+#### `serial logs` - 日志管理
 
-后台记录设备日志（只读模式）。
+`connect` 会自动记录日志到 `/tmp/serial-logs/`，用 `logs` 命令组管理：
 
-**示例**：
 ```bash
-serial log S100-BOOT                          # 自动命名日志文件
-serial log S100-BOOT /tmp/custom-boot.log    # 指定日志文件
-```
-
-**输出示例**：
-```
-记录设备: S100-BOOT (S100 启动日志)
-设备路径: /dev/serial/by-path/pci-0000:00:1d.0-usb-0:2.1:1.0-port0
-波特率: 921600
-日志文件: /tmp/serial-logs/S100-BOOT-20261031-135000.log
-日志记录已启动 (PID: 12345)
-实时查看: tail -f /tmp/serial-logs/S100-BOOT-20261031-135000.log
-停止记录: kill 12345
+serial logs list              # 列出所有日志文件
+serial logs show S100-BOOT    # 查看该设备最新日志（less）
+serial logs follow            # 实时监控所有日志（tail -f）
+serial logs clean 7           # 清理 7 天前的日志
 ```
 
 ---
@@ -392,14 +382,14 @@ serial connect S100-UART
 ### 场景 2：抓取启动日志
 
 ```bash
-# 后台记录启动日志
-serial log S100-BOOT
+# 连接 BOOT 串口（自动记录日志）
+serial connect S100-BOOT
 
-# 实时查看
-tail -f /tmp/serial-logs/S100-BOOT-*.log
+# 或者在另一个终端实时查看日志
+serial logs follow
 
-# 停止记录
-kill <PID>
+# 事后查看历史日志
+serial logs show S100-BOOT
 ```
 
 ---
@@ -473,24 +463,17 @@ DEFAULT_LOG_DIR="$HOME/logs/serial"
 #!/bin/bash
 # CI 脚本：自动抓取板子启动日志
 
-# 配置设备
-serial add CI-BOARD pci-0000:00:1d.0-usb-0:1:1.0-port0 921600 log-only "CI 测试板"
+# 配置设备（直接写配置文件）
+echo "CI-BOARD|pci-0000:00:1d.0-usb-0:1:1.0-port0|921600|terminal|CI 测试板" >> ~/.config/serial/devices.conf
 
-# 启动日志记录
-serial log CI-BOARD /tmp/ci-boot.log &
-LOG_PID=$!
+# 记录日志（前台运行，配合 timeout）
+timeout 60 serial connect CI-BOARD
 
 # 触发板子重启（通过其他工具）
 # reboot-board.sh
 
-# 等待 60 秒
-sleep 60
-
-# 停止日志记录
-kill $LOG_PID
-
 # 分析日志
-grep "Kernel panic" /tmp/ci-boot.log && exit 1
+grep "Kernel panic" /tmp/serial-logs/CI-BOARD-*.log && exit 1
 echo "Boot successful"
 ```
 
