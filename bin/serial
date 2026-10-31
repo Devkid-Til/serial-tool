@@ -36,9 +36,14 @@ show_help() {
 
 连接操作:
   connect <别名> [波特率]                 连接设备（交互模式）
-  log <别名> [日志文件]                   记录设备日志（只读模式）
   raw <设备路径> [波特率]                 直接连接指定设备路径
   monitor [板子名]                        tmux 多窗口监控（无参数=所有设备）
+
+日志管理:
+  logs list                               列出所有日志文件
+  logs show <设备名|文件名>                查看日志（less）
+  logs follow                             实时监控所有日志
+  logs clean [天数]                       清理旧日志（默认 7 天）
 
 示例:
   # 设备管理
@@ -50,10 +55,15 @@ show_help() {
 
   # 连接操作
   serial connect S100-UART
-  serial log S100-BOOT
   serial raw /dev/ttyUSB0 115200
   serial monitor S100                 # 监控 S100 的所有串口
   serial monitor                      # 监控所有设备
+
+  # 日志管理
+  serial logs list                    # 列出所有日志
+  serial logs show S100-BOOT          # 查看 S100-BOOT 最新日志
+  serial logs follow                  # 实时监控
+  serial logs clean 7                 # 清理 7 天前的日志
 
 配置文件: $CONFIG_FILE
 日志目录: $DEFAULT_LOG_DIR
@@ -520,38 +530,190 @@ connect_device() {
     echo "----------------------------------------"
 
     tio -b "$final_baud" -L --log-file "$log_file" --log-strip -t "$device"
+
+    # 退出后提示
+    echo ""
+    echo "日志已保存: $log_file"
+    echo "查看日志: serial logs show $alias"
 }
 
-log_device() {
-    local alias="$1" custom_log="$2"
+# 日志管理命令组
+logs_command() {
+    local subcmd="${1:-}"
+    shift
 
-    local info=$(find_device "$alias")
-    if [ -z "$info" ]; then
-        echo "错误: 未找到设备 '$alias'"
+    if [ -z "$subcmd" ]; then
+        echo "用法: serial logs <子命令> [参数]"
+        echo ""
+        echo "子命令:"
+        echo "  list                    列出所有日志文件"
+        echo "  show <设备名|文件名>     查看日志（less）"
+        echo "  follow                  实时监控所有日志（tail -f）"
+        echo "  clean [天数]            清理旧日志（默认 7 天）"
+        echo ""
+        echo "示例:"
+        echo "  serial logs list"
+        echo "  serial logs show S100-BOOT"
+        echo "  serial logs show S100-BOOT-20261031-230027"
+        echo "  serial logs follow"
+        echo "  serial logs clean 7"
+        return 0
+    fi
+
+    case "$subcmd" in
+        list)
+            logs_list "$@"
+            ;;
+        show)
+            logs_show "$@"
+            ;;
+        follow|tail|-f)
+            logs_follow "$@"
+            ;;
+        clean)
+            logs_clean "$@"
+            ;;
+        *)
+            echo "错误: 未知子命令 '$subcmd'"
+            echo ""
+            echo "可用子命令: list, show, follow, clean"
+            echo "运行 'serial logs' 查看帮助"
+            return 1
+            ;;
+    esac
+}
+
+# 列出所有日志文件
+logs_list() {
+    local log_dir="$DEFAULT_LOG_DIR"
+
+    if [ ! -d "$log_dir" ] || [ -z "$(ls -A "$log_dir" 2>/dev/null)" ]; then
+        echo "没有日志文件"
+        echo "提示: 使用 'serial connect <设备>' 连接设备会自动记录日志"
+        return 0
+    fi
+
+    echo "串口日志文件:"
+    echo "--------------------------------------------------------------------------------"
+    printf "%-20s %-10s %-20s %s\n" "设备" "大小" "修改时间" "文件名"
+    echo "--------------------------------------------------------------------------------"
+
+    local count=0
+    for file in $(ls -t "$log_dir"/*.log 2>/dev/null); do
+        local basename=$(basename "$file" .log)
+        local size=$(du -h "$file" | cut -f1)
+        local mtime=$(stat -c %y "$file" 2>/dev/null | cut -d. -f1 || stat -f "%Sm" "$file")
+
+        # 提取设备名（格式：DEVICE-YYYYMMDD-HHMMSS）
+        local device=$(echo "$basename" | sed 's/-[0-9]\{8\}-[0-9]\{6\}$//')
+
+        printf "%-20s %-10s %-20s %s\n" "$device" "$size" "$mtime" "$(basename "$file")"
+        ((count++))
+    done
+
+    echo "--------------------------------------------------------------------------------"
+    local total=$(du -sh "$log_dir" 2>/dev/null | cut -f1)
+    echo "共 $count 个日志文件，总大小 $total"
+    echo "日志目录: $log_dir"
+    echo ""
+    echo "提示:"
+    echo "  serial logs show <设备名>     查看该设备最新日志"
+    echo "  serial logs show <文件名>     查看指定日志"
+    echo "  serial logs follow            实时监控所有日志"
+    echo "  serial logs clean [天数]      清理旧日志（默认 7 天）"
+}
+
+# 查看日志文件
+logs_show() {
+    local target="$1"
+    local log_dir="$DEFAULT_LOG_DIR"
+
+    if [ -z "$target" ]; then
+        echo "错误: 缺少参数"
+        echo "用法: serial logs show <设备名|文件名>"
         return 1
     fi
 
-    IFS='|' read -r _ path baud usage desc <<< "$info"
+    local log_file=""
 
-    local device="/dev/serial/by-path/$path"
-    if [ ! -e "$device" ]; then
-        echo "错误: 设备不在线: $device"
+    # 尝试精确匹配（完整文件名）
+    if [ -f "$log_dir/$target" ]; then
+        log_file="$log_dir/$target"
+    elif [ -f "$log_dir/$target.log" ]; then
+        log_file="$log_dir/$target.log"
+    else
+        # 尝试设备名匹配（找最新的）
+        log_file=$(ls -t "$log_dir"/${target}*.log 2>/dev/null | head -1)
+
+        if [ -z "$log_file" ]; then
+            echo "错误: 未找到日志文件 '$target'"
+            echo ""
+            echo "可用的日志文件:"
+            ls -1 "$log_dir"/*.log 2>/dev/null | xargs -n1 basename | sed 's/^/  /'
+            return 1
+        fi
+
+        echo "查看设备 '$target' 的最新日志: $(basename "$log_file")"
+        echo ""
+    fi
+
+    # 用 less 打开（支持搜索、翻页）
+    less "$log_file"
+}
+
+# 实时监控所有日志
+logs_follow() {
+    local log_dir="$DEFAULT_LOG_DIR"
+
+    if [ ! -d "$log_dir" ] || [ -z "$(ls -A "$log_dir" 2>/dev/null)" ]; then
+        echo "没有日志文件"
+        echo "提示: 先使用 'serial connect <设备>' 连接设备"
+        return 0
+    fi
+
+    echo "实时监控所有设备日志 (Ctrl+C 退出)..."
+    echo "--------------------------------------------------------------------------------"
+
+    tail -f "$log_dir"/*.log
+}
+
+# 清理旧日志
+logs_clean() {
+    local days="${1:-7}"
+    local log_dir="$DEFAULT_LOG_DIR"
+
+    if [ ! -d "$log_dir" ]; then
+        echo "日志目录不存在: $log_dir"
+        return 0
+    fi
+
+    # 验证天数
+    if [[ ! "$days" =~ ^[0-9]+$ ]]; then
+        echo "错误: 天数必须是数字"
         return 1
     fi
 
-    local log_file="${custom_log:-$DEFAULT_LOG_DIR/${alias}-$(date +%Y%m%d-%H%M%S).log}"
+    echo "清理 $days 天前的日志..."
 
-    echo "记录设备: $alias ($desc)"
-    echo "设备路径: $device"
-    echo "波特率: $baud"
-    echo "日志文件: $log_file"
+    local count=$(find "$log_dir" -name "*.log" -mtime +$days | wc -l)
 
-    tio -b "$baud" -L --log-file "$log_file" --log-strip -t --mute "$device" &
-    local pid=$!
+    if [ "$count" -eq 0 ]; then
+        echo "没有需要清理的日志"
+        return 0
+    fi
 
-    echo "日志记录已启动 (PID: $pid)"
-    echo "实时查看: tail -f $log_file"
-    echo "停止记录: kill $pid"
+    echo "找到 $count 个旧日志文件:"
+    find "$log_dir" -name "*.log" -mtime +$days -exec ls -lh {} \; | awk '{print "  " $NF " (" $5 ")"}'
+
+    read -p "确认删除? (y/N): " -n 1 -r
+    echo
+
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
+        find "$log_dir" -name "*.log" -mtime +$days -delete
+        echo "已删除 $count 个日志文件"
+    else
+        echo "取消清理"
+    fi
 }
 
 connect_raw() {
@@ -769,7 +931,7 @@ case "${1:-}" in
     update)  update_device "$2" "$3" "$4" ;;
     remove)  [ -z "$2" ] && { show_help; exit 1; }; remove_device "$2" ;;
     connect) [ -z "$2" ] && { show_help; exit 1; }; connect_device "$2" "$3" ;;
-    log)     [ -z "$2" ] && { show_help; exit 1; }; log_device "$2" "$3" ;;
+    logs)    logs_command "$2" "$3" ;;
     raw)     [ -z "$2" ] && { show_help; exit 1; }; connect_raw "$2" "$3" ;;
     monitor) monitor_devices "$2" ;;
     *)       show_help ;;
