@@ -812,6 +812,9 @@ monitor_devices() {
     # 创建会话
     tmux new-session -d -s "$session" -n "Monitor"
 
+    # 等待 shell 初始化完成
+    sleep 0.5
+
     # 第一个设备
     tmux send-keys -t "$session:0.0" "serial connect ${devices[0]}" C-m
 
@@ -823,22 +826,28 @@ monitor_devices() {
         2)
             # 左右分屏
             tmux split-window -h -t "$session:0"
+            sleep 0.3
             tmux send-keys -t "$session:0.1" "serial connect ${devices[1]}" C-m
             ;;
         3)
             # 一上两下
             tmux split-window -v -t "$session:0"
+            sleep 0.3
             tmux send-keys -t "$session:0.1" "serial connect ${devices[1]}" C-m
             tmux split-window -h -t "$session:0.1"
+            sleep 0.3
             tmux send-keys -t "$session:0.2" "serial connect ${devices[2]}" C-m
             ;;
         4)
             # 2x2 网格
             tmux split-window -h -t "$session:0"
+            sleep 0.3
             tmux send-keys -t "$session:0.1" "serial connect ${devices[1]}" C-m
             tmux split-window -v -t "$session:0.0"
+            sleep 0.3
             tmux send-keys -t "$session:0.2" "serial connect ${devices[2]}" C-m
             tmux split-window -v -t "$session:0.1"
+            sleep 0.3
             tmux send-keys -t "$session:0.3" "serial connect ${devices[3]}" C-m
             ;;
         *)
@@ -849,6 +858,7 @@ monitor_devices() {
                 else
                     tmux split-window -v -t "$session:0"
                 fi
+                sleep 0.3
                 tmux send-keys -t "$session:0.$i" "serial connect ${devices[$i]}" C-m
                 # 每添加2个窗格重新布局
                 [ $((i % 2)) -eq 0 ] && tmux select-layout -t "$session:0" tiled 2>/dev/null
