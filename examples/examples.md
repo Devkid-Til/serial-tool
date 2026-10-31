@@ -68,28 +68,66 @@ grep "U-Boot" /tmp/serial-logs/S100-BOOT-*.log
 grep "Kernel panic" /tmp/serial-logs/S100-BOOT-*.log
 ```
 
-## 示例 5：tmux 多窗口监控
+## 示例 5：tmux 多窗口监控（推荐）
+
+### 方式1：使用内置 monitor 命令（推荐）
+
+```bash
+# 监控单个板子的所有串口
+serial monitor S100
+# 自动分屏显示 S100-UART 和 S100-BOOT
+
+# 监控所有已配置的设备
+serial monitor
+# 自动网格布局显示所有设备
+```
+
+**效果**：
+```
+┌──────────────────┬──────────────────┐
+│  S100-UART       │  S100-BOOT       │
+│  (交互终端)       │  (启动日志)       │
+│                  │                  │
+│  root@board:~#   │  U-Boot 2023...  │
+│                  │  Starting kern.. │
+└──────────────────┴──────────────────┘
+```
+
+**tmux 快捷键**：
+- `Ctrl+B` → 方向键：切换窗格
+- `Ctrl+B` → `z`：当前窗格全屏/恢复
+- `Ctrl+B` → `d`：分离会话（后台运行）
+- `Ctrl+B` → `[`：滚动查看历史（`q` 退出）
+
+**管理会话**：
+```bash
+tmux attach -t serial-S100      # 重新附加
+tmux kill-session -t serial-S100 # 关闭会话
+tmux ls                          # 列出所有会话
+```
+
+### 方式2：手动 tmux 脚本（自定义布局）
 
 ```bash
 #!/bin/bash
-# monitor.sh - 同时监控多个串口
+# custom-monitor.sh - 自定义多窗口布局
 
-tmux new-session -d -s serial-monitor
+tmux new-session -d -s my-monitor
 
 # 窗口 1: UART 终端
-tmux rename-window -t serial-monitor:0 'UART'
-tmux send-keys -t serial-monitor:0 'serial connect S100-UART' C-m
+tmux rename-window -t my-monitor:0 'UART'
+tmux send-keys -t my-monitor:0 'serial connect S100-UART' C-m
 
 # 窗口 2: 启动日志
-tmux new-window -t serial-monitor:1 -n 'BOOT'
-tmux send-keys -t serial-monitor:1 'serial connect S100-BOOT' C-m
+tmux new-window -t my-monitor:1 -n 'BOOT'
+tmux send-keys -t my-monitor:1 'serial connect S100-BOOT' C-m
 
 # 窗口 3: 日志文件
-tmux new-window -t serial-monitor:2 -n 'LOGS'
-tmux send-keys -t serial-monitor:2 'tail -f /tmp/serial-logs/*.log' C-m
+tmux new-window -t my-monitor:2 -n 'LOGS'
+tmux send-keys -t my-monitor:2 'tail -f /tmp/serial-logs/*.log' C-m
 
 # 附加到会话
-tmux attach -t serial-monitor
+tmux attach -t my-monitor
 ```
 
 ## 示例 6：临时调试未配置的设备
