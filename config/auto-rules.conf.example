@@ -1,0 +1,21 @@
+# 自动命名规则配置文件示例
+# 格式: by-path模式|别名|波特率|用途|备注
+#
+# 模式支持通配符 *
+#
+# 示例:
+#   精确匹配:
+#     pci-0000:00:1d.0-usb-0:1:1.0-port0|S100-UART|921600|terminal|S100 UART
+#
+#   通配符匹配（匹配所有 USB 端口 1 的设备）:
+#     pci-*-usb-0:1:*|BOARD-UART|921600|terminal|开发板 UART
+#
+# 使用:
+#   serial detect --auto    # 自动应用匹配的规则
+
+# S100 开发板示例
+pci-0000:00:1d.0-usb-0:1:*|S100-UART|921600|terminal|S100 主控 UART 终端
+pci-0000:00:1d.0-usb-0:2.1:*|S100-BOOT|921600|log-only|S100 启动日志
+
+# S200 开发板示例（通配符）
+# pci-*-usb-0:3:*|S200-UART|1500000|terminal|S200 UART

@@ -1,0 +1,610 @@
+#!/bin/bash
+#
+# Copyright 2026 jiaqi
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# 串口管理工具
+
+CONFIG_FILE="$HOME/.config/serial/devices.conf"
+AUTO_RULES_FILE="$HOME/.config/serial/auto-rules.conf"
+DEFAULT_LOG_DIR="/tmp/serial-logs"
+
+mkdir -p "$DEFAULT_LOG_DIR" "$(dirname "$CONFIG_FILE")"
+[ ! -f "$CONFIG_FILE" ] && touch "$CONFIG_FILE"
+[ ! -f "$AUTO_RULES_FILE" ] && touch "$AUTO_RULES_FILE"
+
+show_help() {
+    cat <<EOF
+用法: serial <命令> [参数]
+
+设备管理:
+  list                                    列出所有配置的设备
+  detect [--auto]                         扫描设备（--auto 自动应用规则）
+  show <别名>                             显示设备详情
+  add <别名> <by-path路径> [波特率] [用途] [备注]
+  update <别名> <字段> <新值>             字段: path|baud|usage|desc
+  remove <别名>                           删除设备配置
+
+规则管理:
+  rules                                   显示自动命名规则
+  rule-add <by-path模式> <别名> [波特率] [用途] [备注]
+  rule-remove <by-path模式>               删除规则
+
+连接操作:
+  connect <别名> [波特率]                 连接设备（交互模式）
+  log <别名> [日志文件]                   记录设备日志（只读模式）
+  raw <设备路径> [波特率]                 直接连接指定设备路径
+
+示例:
+  # 设备管理
+  serial list
+  serial detect                           # 交互式配置
+  serial detect --auto                    # 自动应用规则
+  serial add S100-UART pci-0000:00:1d.0-usb-0:1:1.0-port0 921600 terminal "S100 主控 UART"
+  serial update S100-UART baud 115200
+  serial remove S100-UART
+
+  # 规则管理
+  serial rules
+  serial rule-add "pci-0000:00:1d.0-usb-0:1:*" S100-UART 921600 terminal "S100 UART"
+  serial rule-remove "pci-0000:00:1d.0-usb-0:1:*"
+
+  # 连接操作
+  serial connect S100-UART
+  serial log S100-BOOT
+  serial raw /dev/ttyUSB0 115200
+
+配置文件: $CONFIG_FILE
+规则文件: $AUTO_RULES_FILE
+日志目录: $DEFAULT_LOG_DIR
+EOF
+}
+
+find_device() {
+    grep "^$1|" "$CONFIG_FILE" 2>/dev/null | head -1
+}
+
+# 根据 by-path 查找设备别名
+find_alias_by_path() {
+    local search_path="$1"
+    while IFS='|' read -r alias path baud usage desc; do
+        [[ "$alias" =~ ^#.*$ ]] && continue
+        [[ -z "$alias" ]] && continue
+        if [ "$path" = "$search_path" ]; then
+            echo "$alias"
+            return 0
+        fi
+    done < "$CONFIG_FILE"
+    return 1
+}
+
+# 根据规则匹配 by-path
+match_rule() {
+    local search_path="$1"
+    [ ! -f "$AUTO_RULES_FILE" ] && return 1
+
+    while IFS='|' read -r pattern alias baud usage desc; do
+        [[ "$pattern" =~ ^#.*$ ]] && continue
+        [[ -z "$pattern" ]] && continue
+
+        # 支持通配符匹配
+        if [[ "$search_path" == $pattern ]]; then
+            echo "$alias|$baud|$usage|$desc"
+            return 0
+        fi
+    done < "$AUTO_RULES_FILE"
+    return 1
+}
+
+# 显示所有规则
+list_rules() {
+    if [ ! -s "$AUTO_RULES_FILE" ]; then
+        echo "规则文件为空，使用 'serial rule-add' 添加规则"
+        return 0
+    fi
+
+    echo "自动命名规则:"
+    echo "----------------------------------------"
+    printf "%-40s %-15s %-10s %-12s %s\n" "by-path 模式" "别名" "波特率" "用途" "备注"
+    echo "----------------------------------------"
+
+    while IFS='|' read -r pattern alias baud usage desc; do
+        [[ "$pattern" =~ ^#.*$ ]] && continue
+        [[ -z "$pattern" ]] && continue
+        printf "%-40s %-15s %-10s %-12s %s\n" "$pattern" "$alias" "$baud" "$usage" "$desc"
+    done < "$AUTO_RULES_FILE"
+
+    echo "----------------------------------------"
+}
+
+# 添加规则
+add_rule() {
+    local pattern="$1" alias="$2" baud="${3:-115200}" usage="${4:-terminal}" desc="${5:-}"
+
+    if [ -z "$pattern" ] || [ -z "$alias" ]; then
+        echo "错误: 缺少必需参数"
+        echo "用法: serial rule-add <by-path模式> <别名> [波特率] [用途] [备注]"
+        return 1
+    fi
+
+    # 检查规则是否已存在（精确匹配第一列）
+    if [ -f "$AUTO_RULES_FILE" ]; then
+        while IFS='|' read -r existing_pattern _; do
+            [[ "$existing_pattern" =~ ^#.*$ ]] && continue
+            if [ "$existing_pattern" = "$pattern" ]; then
+                echo "错误: 规则 '$pattern' 已存在"
+                return 1
+            fi
+        done < "$AUTO_RULES_FILE"
+    fi
+
+    echo "$pattern|$alias|$baud|$usage|$desc" >> "$AUTO_RULES_FILE"
+    echo "已添加规则:"
+    echo "  模式: $pattern"
+    echo "  别名: $alias"
+    echo "  波特率: $baud"
+    echo "  用途: $usage"
+    echo "  备注: $desc"
+}
+
+# 删除规则
+remove_rule() {
+    local pattern="$1"
+
+    if [ -z "$pattern" ]; then
+        echo "错误: 缺少必需参数"
+        echo "用法: serial rule-remove <by-path模式>"
+        return 1
+    fi
+
+    local found=0
+    local temp_file="$AUTO_RULES_FILE.tmp"
+    > "$temp_file"
+
+    while IFS='|' read -r existing_pattern rest; do
+        if [ "$existing_pattern" = "$pattern" ]; then
+            found=1
+            continue
+        fi
+        echo "$existing_pattern|$rest" >> "$temp_file"
+    done < "$AUTO_RULES_FILE"
+
+    if [ $found -eq 0 ]; then
+        rm -f "$temp_file"
+        echo "错误: 规则 '$pattern' 不存在"
+        return 1
+    fi
+
+    mv "$temp_file" "$AUTO_RULES_FILE"
+    echo "已删除规则: $pattern"
+}
+
+# 获取设备芯片/驱动信息
+get_device_info() {
+    local dev="$1"
+    local info=$(udevadm info -n "$dev" 2>/dev/null)
+
+    local driver=$(echo "$info" | grep "ID_USB_DRIVER=" | cut -d= -f2)
+    local vendor=$(echo "$info" | grep "ID_VENDOR_ID=" | cut -d= -f2)
+    local model=$(echo "$info" | grep "ID_MODEL=" | cut -d= -f2)
+    local serial=$(echo "$info" | grep "ID_SERIAL_SHORT=" | cut -d= -f2)
+
+    # 芯片型号友好名称
+    case "$driver" in
+        ch341) driver="CH341" ;;
+        ftdi_sio) driver="FTDI" ;;
+        cp210x) driver="CP210x" ;;
+        pl2303) driver="PL2303" ;;
+        *) driver="${driver:-unknown}" ;;
+    esac
+
+    echo "$driver|$vendor|$model|$serial"
+}
+
+# 扫描并交互式配置设备
+detect_devices() {
+    local auto_mode=0
+    [ "$1" = "--auto" ] && auto_mode=1
+
+    echo "扫描 USB 串口设备..."
+    echo ""
+
+    local devices=()
+    local seen_devs=()
+    local index=1
+
+    # 扫描所有 by-path 设备（去重）
+    for link in /dev/serial/by-path/*; do
+        [ ! -e "$link" ] && continue
+
+        local dev=$(readlink -f "$link")
+        local path=$(basename "$link")
+        local devname=$(basename "$dev")
+
+        # 去重：跳过已见过的设备（usbv1-* 和 usb-* 是同一设备）
+        local skip=0
+        for seen in "${seen_devs[@]}"; do
+            if [ "$seen" = "$devname" ]; then
+                skip=1
+                break
+            fi
+        done
+        [ $skip -eq 1 ] && continue
+
+        seen_devs+=("$devname")
+        devices+=("$devname|$path")
+        ((index++))
+    done
+
+    if [ ${#devices[@]} -eq 0 ]; then
+        echo "未检测到 USB 串口设备"
+        return 0
+    fi
+
+    echo "检测到 ${#devices[@]} 个 USB 串口设备:"
+    echo ""
+
+    # 显示所有设备
+    local i=1
+    local unconfigured=()
+    for entry in "${devices[@]}"; do
+        IFS='|' read -r devname path <<< "$entry"
+        local dev="/dev/$devname"
+
+        echo "[$i] $devname"
+        echo "    by-path: $path"
+
+        # 获取设备信息
+        IFS='|' read -r driver vendor model serial <<< "$(get_device_info "$dev")"
+        echo "    芯片: $driver"
+        [ -n "$vendor" ] && echo "    厂商: $vendor"
+        [ -n "$model" ] && echo "    型号: $model"
+        [ -n "$serial" ] && echo "    序列号: $serial"
+
+        # 检查是否已配置
+        local existing_alias=$(find_alias_by_path "$path")
+        if [ -n "$existing_alias" ]; then
+            echo "    状态: 已配置为 $existing_alias"
+        else
+            # 检查是否有匹配的规则
+            local rule=$(match_rule "$path")
+            if [ -n "$rule" ]; then
+                IFS='|' read -r rule_alias rule_baud rule_usage rule_desc <<< "$rule"
+                echo "    状态: 未配置（匹配规则: $rule_alias）"
+                unconfigured+=("$devname|$path|$rule_alias|$rule_baud|$rule_usage|$rule_desc")
+            else
+                echo "    状态: 未配置（无匹配规则）"
+                unconfigured+=("$devname|$path||||")
+            fi
+        fi
+        echo ""
+        ((i++))
+    done
+
+    # 自动模式：应用规则
+    if [ $auto_mode -eq 1 ]; then
+        if [ ${#unconfigured[@]} -eq 0 ]; then
+            echo "所有设备已配置完成"
+            return 0
+        fi
+
+        echo "----------------------------------------"
+        echo "自动应用规则..."
+        echo ""
+
+        local applied=0
+        for entry in "${unconfigured[@]}"; do
+            IFS='|' read -r devname path alias baud usage desc <<< "$entry"
+
+            if [ -z "$alias" ]; then
+                echo "跳过 $devname ($path): 无匹配规则"
+                continue
+            fi
+
+            add_device "$alias" "$path" "$baud" "$usage" "$desc"
+            ((applied++))
+            echo ""
+        done
+
+        echo "----------------------------------------"
+        echo "自动配置完成: $applied 个设备"
+        return 0
+    fi
+
+    # 交互模式
+    if [ ${#unconfigured[@]} -eq 0 ]; then
+        echo "所有设备已配置完成"
+        return 0
+    fi
+
+    echo "----------------------------------------"
+    read -p "是否为未配置的设备创建别名? (y/N): " -n 1 -r
+    echo
+
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        return 0
+    fi
+
+    i=1
+    for entry in "${unconfigured[@]}"; do
+        IFS='|' read -r devname path rule_alias rule_baud rule_usage rule_desc <<< "$entry"
+
+        echo ""
+        echo "配置设备 $devname ($path)"
+
+        # 如果有规则，显示建议值
+        if [ -n "$rule_alias" ]; then
+            echo "  匹配规则: $rule_alias"
+            read -p "  别名 [默认 $rule_alias]: " alias
+            alias=${alias:-$rule_alias}
+
+            read -p "  波特率 [默认 $rule_baud]: " baud
+            baud=${baud:-$rule_baud}
+
+            read -p "  用途 (terminal/log-only) [默认 $rule_usage]: " usage
+            usage=${usage:-$rule_usage}
+
+            read -p "  备注 [默认 $rule_desc]: " desc
+            desc=${desc:-$rule_desc}
+        else
+            read -p "  别名 (留空跳过): " alias
+            if [ -z "$alias" ]; then
+                ((i++))
+                continue
+            fi
+
+            read -p "  波特率 [默认 115200]: " baud
+            baud=${baud:-115200}
+
+            read -p "  用途 (terminal/log-only) [默认 terminal]: " usage
+            usage=${usage:-terminal}
+
+            read -p "  备注: " desc
+        fi
+
+        add_device "$alias" "$path" "$baud" "$usage" "$desc"
+        ((i++))
+    done
+}
+
+list_devices() {
+    if [ ! -s "$CONFIG_FILE" ]; then
+        echo "配置文件为空，使用 'serial add' 添加设备"
+        return 0
+    fi
+
+    echo "已配置的串口设备:"
+    echo "----------------------------------------"
+    printf "%-15s %-10s %-12s %s\n" "别名" "波特率" "用途" "备注"
+    echo "----------------------------------------"
+
+    while IFS='|' read -r alias path baud usage desc; do
+        [[ "$alias" =~ ^#.*$ ]] && continue
+        [[ -z "$alias" ]] && continue
+
+        local status="✗"
+        [ -e "/dev/serial/by-path/$path" ] && status="✓"
+
+        printf "%-15s %-10s %-12s %s [%s]\n" "$alias" "$baud" "$usage" "$desc" "$status"
+    done < "$CONFIG_FILE"
+
+    echo "----------------------------------------"
+    echo "[✓] 设备在线  [✗] 设备离线"
+}
+
+show_device() {
+    local alias="$1"
+    local info=$(find_device "$alias")
+
+    if [ -z "$info" ]; then
+        echo "错误: 未找到设备 '$alias'"
+        return 1
+    fi
+
+    IFS='|' read -r _ path baud usage desc <<< "$info"
+
+    echo "设备详情:"
+    echo "  别名:     $alias"
+    echo "  by-path:  $path"
+    echo "  波特率:   $baud"
+    echo "  用途:     $usage"
+    echo "  备注:     $desc"
+
+    local device="/dev/serial/by-path/$path"
+    if [ -e "$device" ]; then
+        local actual=$(readlink -f "$device")
+        echo "  状态:     在线 ($actual)"
+    else
+        echo "  状态:     离线"
+    fi
+}
+
+add_device() {
+    local alias="$1" path="$2" baud="${3:-115200}" usage="${4:-terminal}" desc="${5:-}"
+
+    if [ -z "$alias" ] || [ -z "$path" ]; then
+        echo "错误: 缺少必需参数"
+        echo "用法: serial add <别名> <by-path路径> [波特率] [用途] [备注]"
+        return 1
+    fi
+
+    if [ -n "$(find_device "$alias")" ]; then
+        echo "错误: 设备 '$alias' 已存在，使用 'serial update' 修改"
+        return 1
+    fi
+
+    echo "$alias|$path|$baud|$usage|$desc" >> "$CONFIG_FILE"
+    echo "已添加设备: $alias"
+    show_device "$alias"
+}
+
+update_device() {
+    local alias="$1" field="$2" value="$3"
+
+    if [ -z "$alias" ] || [ -z "$field" ] || [ -z "$value" ]; then
+        echo "错误: 缺少必需参数"
+        echo "用法: serial update <别名> <字段> <新值>"
+        echo "字段: path|baud|usage|desc"
+        return 1
+    fi
+
+    local info=$(find_device "$alias")
+    if [ -z "$info" ]; then
+        echo "错误: 未找到设备 '$alias'"
+        return 1
+    fi
+
+    IFS='|' read -r _ old_path old_baud old_usage old_desc <<< "$info"
+
+    local new_path="$old_path" new_baud="$old_baud" new_usage="$old_usage" new_desc="$old_desc"
+
+    case "$field" in
+        path)  new_path="$value" ;;
+        baud)  new_baud="$value" ;;
+        usage) new_usage="$value" ;;
+        desc)  new_desc="$value" ;;
+        *)
+            echo "错误: 未知字段 '$field'"
+            echo "可用字段: path|baud|usage|desc"
+            return 1
+            ;;
+    esac
+
+    grep -v "^$alias|" "$CONFIG_FILE" > "$CONFIG_FILE.tmp"
+    echo "$alias|$new_path|$new_baud|$new_usage|$new_desc" >> "$CONFIG_FILE.tmp"
+    mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
+
+    echo "已更新设备: $alias"
+    show_device "$alias"
+}
+
+remove_device() {
+    local alias="$1"
+
+    if [ -z "$(find_device "$alias")" ]; then
+        echo "错误: 未找到设备 '$alias'"
+        return 1
+    fi
+
+    grep -v "^$alias|" "$CONFIG_FILE" > "$CONFIG_FILE.tmp"
+    mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
+
+    echo "已删除设备: $alias"
+}
+
+connect_device() {
+    local alias="$1" custom_baud="$2"
+
+    local info=$(find_device "$alias")
+    if [ -z "$info" ]; then
+        echo "错误: 未找到设备 '$alias'"
+        echo "运行 'serial list' 查看可用设备"
+        return 1
+    fi
+
+    IFS='|' read -r _ path baud usage desc <<< "$info"
+
+    if [ "$usage" = "log-only" ]; then
+        echo "警告: $alias 是只读日志设备，不适合交互"
+        read -p "仍要继续吗? (y/N) " -n 1 -r
+        echo
+        [[ ! $REPLY =~ ^[Yy]$ ]] && return 1
+    fi
+
+    local device="/dev/serial/by-path/$path"
+    if [ ! -e "$device" ]; then
+        echo "错误: 设备不在线: $device"
+        echo "可用设备:"
+        ls -l /dev/serial/by-path/ 2>/dev/null
+        return 1
+    fi
+
+    local final_baud="${custom_baud:-$baud}"
+    local log_file="$DEFAULT_LOG_DIR/${alias}-$(date +%Y%m%d-%H%M%S).log"
+
+    echo "连接设备: $alias ($desc)"
+    echo "设备路径: $device"
+    echo "波特率: $final_baud"
+    echo "日志文件: $log_file"
+    echo "提示: Ctrl-T Q 退出"
+    echo "----------------------------------------"
+
+    tio -b "$final_baud" -L --log-file "$log_file" --log-strip -t "$device"
+}
+
+log_device() {
+    local alias="$1" custom_log="$2"
+
+    local info=$(find_device "$alias")
+    if [ -z "$info" ]; then
+        echo "错误: 未找到设备 '$alias'"
+        return 1
+    fi
+
+    IFS='|' read -r _ path baud usage desc <<< "$info"
+
+    local device="/dev/serial/by-path/$path"
+    if [ ! -e "$device" ]; then
+        echo "错误: 设备不在线: $device"
+        return 1
+    fi
+
+    local log_file="${custom_log:-$DEFAULT_LOG_DIR/${alias}-$(date +%Y%m%d-%H%M%S).log}"
+
+    echo "记录设备: $alias ($desc)"
+    echo "设备路径: $device"
+    echo "波特率: $baud"
+    echo "日志文件: $log_file"
+
+    tio -b "$baud" -L --log-file "$log_file" --log-strip -t --mute "$device" &
+    local pid=$!
+
+    echo "日志记录已启动 (PID: $pid)"
+    echo "实时查看: tail -f $log_file"
+    echo "停止记录: kill $pid"
+}
+
+connect_raw() {
+    local device="$1" baud="${2:-115200}"
+
+    if [ ! -e "$device" ]; then
+        echo "错误: 设备不存在: $device"
+        return 1
+    fi
+
+    local log_file="$DEFAULT_LOG_DIR/raw-$(basename $device)-$(date +%Y%m%d-%H%M%S).log"
+
+    echo "直接连接: $device"
+    echo "波特率: $baud"
+    echo "日志文件: $log_file"
+    echo "----------------------------------------"
+
+    tio -b "$baud" -L --log-file "$log_file" --log-strip -t "$device"
+}
+
+case "${1:-}" in
+    list)    list_devices ;;
+    detect)  detect_devices "$2" ;;
+    show)    [ -z "$2" ] && { show_help; exit 1; }; show_device "$2" ;;
+    rules)   list_rules ;;
+    rule-add) add_rule "$2" "$3" "$4" "$5" "$6" ;;
+    rule-remove) [ -z "$2" ] && { show_help; exit 1; }; remove_rule "$2" ;;
+    add)     add_device "$2" "$3" "$4" "$5" "$6" ;;
+    update)  update_device "$2" "$3" "$4" ;;
+    remove)  [ -z "$2" ] && { show_help; exit 1; }; remove_device "$2" ;;
+    connect) [ -z "$2" ] && { show_help; exit 1; }; connect_device "$2" "$3" ;;
+    log)     [ -z "$2" ] && { show_help; exit 1; }; log_device "$2" "$3" ;;
+    raw)     [ -z "$2" ] && { show_help; exit 1; }; connect_raw "$2" "$3" ;;
+    *)       show_help ;;
+esac

@@ -1,0 +1,13 @@
+# 设备配置文件示例
+# 格式: 别名|by-path路径|波特率|用途|备注
+#
+# 用途说明:
+#   terminal  - 交互式终端
+#   log-only  - 只读日志设备
+#
+# 获取 by-path 路径:
+#   ls -l /dev/serial/by-path/
+#
+# 示例:
+# S100-UART|pci-0000:00:1d.0-usb-0:1:1.0-port0|921600|terminal|S100 主控 UART 终端
+# S100-BOOT|pci-0000:00:1d.0-usb-0:2.1:1.0-port0|921600|log-only|S100 启动日志
