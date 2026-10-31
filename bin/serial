@@ -247,10 +247,15 @@ detect_devices() {
             read -p "  请选择 [1-$((j+1))]: " choice
 
             # 处理选择
-            if [ "$choice" -ge 1 ] && [ "$choice" -lt "$j" ]; then
+            if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -lt "$j" ]; then
                 alias="${suggestions[$((choice-1))]}"
-            elif [ "$choice" -eq "$j" ]; then
+            elif [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -eq "$j" ]; then
                 read -p "  请输入别名: " alias
+                # 验证手动输入的别名
+                if ! validate_alias "$alias"; then
+                    echo "  跳过此设备"
+                    continue
+                fi
             else
                 echo "  跳过此设备"
                 continue
@@ -258,13 +263,28 @@ detect_devices() {
         else
             read -p "  别名 (留空跳过): " alias
             [ -z "$alias" ] && continue
+            # 验证手动输入的别名
+            if ! validate_alias "$alias"; then
+                echo "  跳过此设备"
+                continue
+            fi
         fi
 
         read -p "  波特率 [默认 921600]: " baud
         baud=${baud:-921600}
+        # 验证波特率
+        if ! validate_baud "$baud"; then
+            echo "  跳过此设备"
+            continue
+        fi
 
         read -p "  用途 (terminal/log-only) [默认 terminal]: " usage
         usage=${usage:-terminal}
+        # 验证用途
+        if ! validate_usage "$usage"; then
+            echo "  跳过此设备"
+            continue
+        fi
 
         read -p "  备注: " desc
 
@@ -324,6 +344,66 @@ show_device() {
     fi
 }
 
+# 验证别名格式
+validate_alias() {
+    local alias="$1"
+
+    # 检查是否为空
+    if [ -z "$alias" ]; then
+        echo "错误: 别名不能为空"
+        return 1
+    fi
+
+    # 别名只能包含字母、数字、横线、下划线
+    if [[ ! "$alias" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+        echo "错误: 别名格式非法"
+        echo "别名只能包含字母、数字、横线(-)、下划线(_)"
+        echo "不允许: 空格、斜杠、特殊字符"
+        return 1
+    fi
+
+    # 长度限制
+    if [ ${#alias} -gt 50 ]; then
+        echo "错误: 别名过长（最多 50 字符）"
+        return 1
+    fi
+
+    return 0
+}
+
+# 验证波特率
+validate_baud() {
+    local baud="$1"
+
+    # 必须是数字
+    if [[ ! "$baud" =~ ^[0-9]+$ ]]; then
+        echo "错误: 波特率必须是数字"
+        return 1
+    fi
+
+    # 常见波特率范围
+    if [ "$baud" -lt 300 ] || [ "$baud" -gt 4000000 ]; then
+        echo "警告: 波特率 $baud 不在常见范围内 (300-4000000)"
+        read -p "是否继续? (y/N): " -n 1 -r
+        echo
+        [[ ! $REPLY =~ ^[Yy]$ ]] && return 1
+    fi
+
+    return 0
+}
+
+# 验证用途
+validate_usage() {
+    local usage="$1"
+
+    if [ "$usage" != "terminal" ] && [ "$usage" != "log-only" ]; then
+        echo "错误: 用途必须是 terminal 或 log-only"
+        return 1
+    fi
+
+    return 0
+}
+
 add_device() {
     local alias="$1" path="$2" baud="${3:-115200}" usage="${4:-terminal}" desc="${5:-}"
 
@@ -332,6 +412,11 @@ add_device() {
         echo "用法: serial add <别名> <by-path路径> [波特率] [用途] [备注]"
         return 1
     fi
+
+    # 验证输入
+    validate_alias "$alias" || return 1
+    validate_baud "$baud" || return 1
+    validate_usage "$usage" || return 1
 
     if [ -n "$(find_device "$alias")" ]; then
         echo "错误: 设备 '$alias' 已存在，使用 'serial update' 修改"
