@@ -45,6 +45,7 @@ show_help() {
   connect <别名> [波特率]                 连接设备（交互模式）
   log <别名> [日志文件]                   记录设备日志（只读模式）
   raw <设备路径> [波特率]                 直接连接指定设备路径
+  monitor [板子名]                        tmux 多窗口监控（无参数=所有设备）
 
 示例:
   # 设备管理
@@ -64,6 +65,8 @@ show_help() {
   serial connect S100-UART
   serial log S100-BOOT
   serial raw /dev/ttyUSB0 115200
+  serial monitor S100                 # 监控 S100 的所有串口
+  serial monitor                      # 监控所有设备
 
 配置文件: $CONFIG_FILE
 规则文件: $AUTO_RULES_FILE
@@ -593,6 +596,147 @@ connect_raw() {
     tio -b "$baud" -L --log-file "$log_file" --log-strip -t "$device"
 }
 
+# 监控多个设备（tmux 分屏）
+monitor_devices() {
+    local board="$1"
+    local devices=()
+
+    # 收集设备列表
+    if [ -n "$board" ]; then
+        # 模式1：指定板子
+        while IFS='|' read -r alias _; do
+            [[ "$alias" =~ ^#.*$ ]] && continue
+            [[ -z "$alias" ]] && continue
+            [[ "$alias" =~ ^${board}- ]] && devices+=("$alias")
+        done < "$CONFIG_FILE"
+
+        if [ ${#devices[@]} -eq 0 ]; then
+            echo "错误: 未找到板子 '$board' 的设备"
+            echo "运行 'serial list' 查看可用设备"
+            return 1
+        fi
+
+        local session="serial-${board}"
+    else
+        # 模式2：所有设备
+        while IFS='|' read -r alias _; do
+            [[ "$alias" =~ ^#.*$ ]] && continue
+            [[ -z "$alias" ]] && continue
+            devices+=("$alias")
+        done < "$CONFIG_FILE"
+
+        if [ ${#devices[@]} -eq 0 ]; then
+            echo "错误: 没有已配置的设备"
+            echo "运行 'serial detect --auto' 自动配置"
+            return 1
+        fi
+
+        local session="serial-all"
+    fi
+
+    # 检查 tmux
+    if ! command -v tmux &> /dev/null; then
+        echo "错误: 未安装 tmux"
+        echo "安装: sudo apt install tmux"
+        echo ""
+        echo "或者分别运行:"
+        for dev in "${devices[@]}"; do
+            echo "  serial connect $dev"
+        done
+        return 1
+    fi
+
+    # 检查会话是否已存在
+    if tmux has-session -t "$session" 2>/dev/null; then
+        echo "会话 '$session' 已存在"
+        read -p "是否杀掉重建? (y/N): " -n 1 -r
+        echo
+        if [[ $REPLY =~ ^[Yy]$ ]]; then
+            tmux kill-session -t "$session"
+        else
+            echo "附加到现有会话..."
+            tmux attach -t "$session"
+            return 0
+        fi
+    fi
+
+    local count=${#devices[@]}
+    echo "启动监控: $count 个设备"
+    echo "设备列表: ${devices[*]}"
+    echo ""
+
+    # 创建会话
+    tmux new-session -d -s "$session" -n "Monitor"
+
+    # 第一个设备
+    tmux send-keys -t "$session:0.0" "serial connect ${devices[0]}" C-m
+
+    # 根据设备数量分屏
+    case $count in
+        1)
+            # 只有一个设备，直接附加
+            ;;
+        2)
+            # 左右分屏
+            tmux split-window -h -t "$session:0"
+            tmux send-keys -t "$session:0.1" "serial connect ${devices[1]}" C-m
+            ;;
+        3)
+            # 一上两下
+            tmux split-window -v -t "$session:0"
+            tmux send-keys -t "$session:0.1" "serial connect ${devices[1]}" C-m
+            tmux split-window -h -t "$session:0.1"
+            tmux send-keys -t "$session:0.2" "serial connect ${devices[2]}" C-m
+            ;;
+        4)
+            # 2x2 网格
+            tmux split-window -h -t "$session:0"
+            tmux send-keys -t "$session:0.1" "serial connect ${devices[1]}" C-m
+            tmux split-window -v -t "$session:0.0"
+            tmux send-keys -t "$session:0.2" "serial connect ${devices[2]}" C-m
+            tmux split-window -v -t "$session:0.1"
+            tmux send-keys -t "$session:0.3" "serial connect ${devices[3]}" C-m
+            ;;
+        *)
+            # 5+ 设备，自动平铺
+            for ((i=1; i<count; i++)); do
+                if [ $((i % 2)) -eq 1 ]; then
+                    tmux split-window -h -t "$session:0"
+                else
+                    tmux split-window -v -t "$session:0"
+                fi
+                tmux send-keys -t "$session:0.$i" "serial connect ${devices[$i]}" C-m
+                # 每添加2个窗格重新布局
+                [ $((i % 2)) -eq 0 ] && tmux select-layout -t "$session:0" tiled 2>/dev/null
+            done
+            tmux select-layout -t "$session:0" tiled
+            ;;
+    esac
+
+    # 显示操作提示
+    cat <<EOF
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+监控会话已启动: $session
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+tmux 快捷键:
+  Ctrl+B → 方向键    切换窗格
+  Ctrl+B → z         当前窗格全屏/恢复
+  Ctrl+B → d         分离会话（后台运行）
+  Ctrl+B → [         滚动查看历史（q 退出）
+
+管理命令:
+  tmux attach -t $session      重新附加
+  tmux kill-session -t $session  关闭所有
+  tmux ls                       列出所有会话
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+EOF
+
+    # 附加到会话
+    tmux attach -t "$session"
+}
+
 case "${1:-}" in
     list)    list_devices ;;
     detect)  detect_devices "$2" ;;
@@ -606,5 +750,6 @@ case "${1:-}" in
     connect) [ -z "$2" ] && { show_help; exit 1; }; connect_device "$2" "$3" ;;
     log)     [ -z "$2" ] && { show_help; exit 1; }; log_device "$2" "$3" ;;
     raw)     [ -z "$2" ] && { show_help; exit 1; }; connect_raw "$2" "$3" ;;
+    monitor) monitor_devices "$2" ;;
     *)       show_help ;;
 esac
