@@ -38,7 +38,8 @@ show_help() {
   list                                    列出所有配置的设备
   detect                                  扫描设备并交互式配置新设备
   show <别名>                             显示设备详情
-  update <别名> <字段> <新值>             字段: path|baud|usage|desc
+  update <别名>                           交互式逐项更新设备配置
+  update <别名> <字段> <新值>             命令行模式（字段: path|baud|usage|desc）
   remove <别名>                           删除设备配置
 
   提示: 自动化场景可直接编辑配置文件，格式见配置文件头部注释
@@ -58,7 +59,8 @@ show_help() {
   # 设备管理
   serial list
   serial detect                           # 扫描并配置新设备
-  serial update S100-UART baud 115200
+  serial update S100-UART                 # 交互式更新（回车保持不变）
+  serial update S100-UART baud 115200     # 命令行模式（脚本用）
   serial remove S100-UART
 
   # 连接操作
@@ -450,13 +452,85 @@ add_device() {
     show_device "$alias"
 }
 
+# 交互式更新设备（回车保持当前值）
+update_device_interactive() {
+    local alias="$1"
+
+    local info=$(find_device "$alias")
+    if [ -z "$info" ]; then
+        echo "错误: 未找到设备 '$alias'"
+        echo "运行 'serial list' 查看可用设备"
+        return 1
+    fi
+
+    IFS='|' read -r _ old_path old_baud old_usage old_desc <<< "$info"
+
+    echo "更新设备 $alias（回车保持不变）"
+
+    # by-path
+    read -p "  by-path [$old_path]: " new_path
+    new_path=${new_path:-$old_path}
+
+    # 波特率
+    read -p "  波特率 [$old_baud]: " new_baud
+    new_baud=${new_baud:-$old_baud}
+    if ! validate_baud "$new_baud"; then
+        echo "已取消"
+        return 1
+    fi
+
+    # 用途选择菜单
+    local current_choice=1
+    [ "$old_usage" = "log-only" ] && current_choice=2
+    echo "  用途:"
+    echo "    1) terminal  - 交互式终端（可输入命令）"
+    echo "    2) log-only  - 日志记录（主要用于输出）"
+    read -p "  请选择 [1-2, 当前 $current_choice]: " usage_choice
+    case "${usage_choice:-$current_choice}" in
+        1) new_usage="terminal" ;;
+        2) new_usage="log-only" ;;
+        *) new_usage="$old_usage" ;;
+    esac
+
+    # 备注
+    read -p "  备注 [$old_desc]: " new_desc
+    new_desc=${new_desc:-$old_desc}
+
+    # 检查是否有变更
+    if [ "$new_path" = "$old_path" ] && \
+       [ "$new_baud" = "$old_baud" ] && \
+       [ "$new_usage" = "$old_usage" ] && \
+       [ "$new_desc" = "$old_desc" ]; then
+        echo "未做任何修改"
+        return 0
+    fi
+
+    # 写入配置
+    grep -v "^$alias|" "$CONFIG_FILE" > "$CONFIG_FILE.tmp"
+    echo "$alias|$new_path|$new_baud|$new_usage|$new_desc" >> "$CONFIG_FILE.tmp"
+    mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
+
+    # 显示变更摘要
+    echo "✓ 已更新设备: $alias"
+    [ "$new_path" != "$old_path" ]   && echo "  path:  $old_path → $new_path"
+    [ "$new_baud" != "$old_baud" ]   && echo "  baud:  $old_baud → $new_baud"
+    [ "$new_usage" != "$old_usage" ] && echo "  usage: $old_usage → $new_usage"
+    [ "$new_desc" != "$old_desc" ]   && echo "  desc:  $old_desc → $new_desc"
+}
+
 update_device() {
     local alias="$1" field="$2" value="$3"
 
+    # 无字段参数时进入交互模式
+    if [ -n "$alias" ] && [ -z "$field" ]; then
+        update_device_interactive "$alias"
+        return $?
+    fi
+
     if [ -z "$alias" ] || [ -z "$field" ] || [ -z "$value" ]; then
-        echo "错误: 缺少必需参数"
-        echo "用法: serial update <别名> <字段> <新值>"
-        echo "字段: path|baud|usage|desc"
+        echo "用法: serial update <别名> [字段 新值]"
+        echo "  不带字段参数: 交互式逐项更新"
+        echo "  字段: path|baud|usage|desc（命令行模式，供脚本使用）"
         return 1
     fi
 
@@ -472,8 +546,14 @@ update_device() {
 
     case "$field" in
         path)  new_path="$value" ;;
-        baud)  new_baud="$value" ;;
-        usage) new_usage="$value" ;;
+        baud)
+            validate_baud "$value" || return 1
+            new_baud="$value"
+            ;;
+        usage)
+            validate_usage "$value" || return 1
+            new_usage="$value"
+            ;;
         desc)  new_desc="$value" ;;
         *)
             echo "错误: 未知字段 '$field'"
