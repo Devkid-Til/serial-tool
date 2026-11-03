@@ -136,7 +136,7 @@ serial-tool/
 │   └── examples.md         # 使用示例
 ├── install.sh              # 安装脚本
 ├── uninstall.sh            # 卸载脚本
-├── LICENSE                 # MIT 许可证
+├── LICENSE                 # Apache License 2.0
 └── README.md               # 本文件
 ```
 
